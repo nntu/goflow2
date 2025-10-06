@@ -1,31 +1,38 @@
 package influxdb
 
 import (
-	"context"
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"strconv"
+	"fmt"
+	"math"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
-	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
-
-	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/jnovack/flag"
 	"github.com/netsampler/goflow2/v2/transport"
 	log "github.com/sirupsen/logrus"
 )
 
 type InfluxDbDriver struct {
-	client              influxdb2.Client
-	writeApi            api.WriteAPI
 	influxUrl           string
 	influxToken         string
 	influxOrganization  string
 	influxBucket        string
+	influxMeasurement   string
+	influxPrecision     string
 	influxGZip          bool
 	influxTLSSkipVerify bool
 	influxLogErrors     bool
+	batchSize           int
+	batchData           []map[string]interface{}
+	lock                *sync.RWMutex
 	q                   chan bool
+	maxRetries          int
+	retryDelay          time.Duration
 }
 
 func (d *InfluxDbDriver) Prepare() error {
@@ -33,142 +40,221 @@ func (d *InfluxDbDriver) Prepare() error {
 	flag.StringVar(&d.influxToken, "transport.influxdb.token", "", "InfluxDB API token")
 	flag.StringVar(&d.influxOrganization, "transport.influxdb.organization", "", "InfluxDB organization containing bucket")
 	flag.StringVar(&d.influxBucket, "transport.influxdb.bucket", "", "InfluxDB bucket used for writing")
+	flag.StringVar(&d.influxMeasurement, "transport.influxdb.measurement", "flowdata", "InfluxDB measurement name")
+	flag.StringVar(&d.influxPrecision, "transport.influxdb.precision", "ms", "InfluxDB time precision (ns, us, ms, s)")
 	flag.BoolVar(&d.influxGZip, "transport.influxdb.gzip", true, "Use GZip compression")
 	flag.BoolVar(&d.influxTLSSkipVerify, "transport.influxdb.skiptlsverify", false, "Insecure TLS skip verify")
 	flag.BoolVar(&d.influxLogErrors, "transport.influxdb.log.errors", true, "Log InfluxDB write errors")
+	flag.IntVar(&d.batchSize, "transport.influxdb.batchSize", 1000, "Batch size for sending records")
+	flag.IntVar(&d.maxRetries, "transport.influxdb.maxRetries", 3, "Maximum number of retries for failed requests")
+	retryDelay := flag.Int("transport.influxdb.retryDelay", 500, "Initial retry delay in milliseconds")
 
-	//TODO: Add retry parameters
+	if d.batchSize <= 0 {
+		d.batchSize = 1000 // default batch size
+	}
+
+	if d.maxRetries <= 0 {
+		d.maxRetries = 3 // default max retries
+	}
+
+	d.retryDelay = time.Duration(*retryDelay) * time.Millisecond
+
 	return nil
 }
 
-func (d *InfluxDbDriver) Init(context.Context) error {
-	client := influxdb2.NewClientWithOptions(d.influxUrl, d.influxToken,
-		influxdb2.DefaultOptions().
-			SetUseGZip(d.influxGZip).
-			SetTLSConfig(&tls.Config{
-				InsecureSkipVerify: d.influxTLSSkipVerify,
-			}))
-	writeApi := client.WriteAPI(d.influxOrganization, d.influxBucket)
-	d.client = client
-	d.writeApi = writeApi
-	d.q = make(chan bool)
-
-	if d.influxLogErrors {
-		errorCh := d.writeApi.Errors()
-
-		go func() {
-			for {
-				select {
-				case msg := <-errorCh:
-					//if log != nil {
-					log.Error(msg)
-					//}
-				case <-d.q:
-					return
-				}
-			}
-		}()
-	}
+func (d *InfluxDbDriver) Init() error {
+	d.q = make(chan bool, 1)
+	d.batchData = make([]map[string]interface{}, 0, d.batchSize)
+	d.lock = &sync.RWMutex{}
 	return nil
 }
 
 func (d *InfluxDbDriver) Send(key, data []byte) error {
-	// convert json bytes back to FlowMessage
-	var fmsg map[string]any
-	err := json.Unmarshal(data, &fmsg)
+	var flowData map[string]interface{}
+	err := json.Unmarshal(data, &flowData)
 	if err != nil {
 		return err
 	}
 
-	p := influxdb2.NewPointWithMeasurement("flowdata").
-		AddTag("type", fmsg["Type"].(string)).
-		AddTag("sampler_address", fmsg["SamplerAddress"].(string)).
-		AddTag("src_addr", fmsg["SrcAddr"].(string)).
-		AddTag("dst_addr", fmsg["DstAddr"].(string)).
-		AddTag("src_port", strconv.FormatInt(int64(fmsg["SrcPort"].(float64)), 10)).
-		AddTag("dst_port", strconv.FormatInt(int64(fmsg["DstPort"].(float64)), 10)).
-		AddTag("in_if", strconv.FormatInt(int64(fmsg["InIf"].(float64)), 10)).
-		AddTag("out_if", strconv.FormatInt(int64(fmsg["OutIf"].(float64)), 10)).
-		AddField("time_received", int64(fmsg["TimeReceived"].(float64))).
-		AddField("sequence_num", int64(fmsg["SequenceNum"].(float64))).
-		AddField("sampling_rate", int64(fmsg["SamplingRate"].(float64))).
-		AddField("flow_direction", int64(fmsg["FlowDirection"].(float64))).
-		AddField("time_flow_start", int64(fmsg["TimeFlowStart"].(float64))).
-		AddField("time_flow_end", int64(fmsg["TimeFlowEnd"].(float64))).
-		AddField("time_flow_start_ms", int64(fmsg["TimeFlowStartMs"].(float64))).
-		AddField("time_flow_end_ms", int64(fmsg["TimeFlowEndMs"].(float64))).
-		AddField("bytes", int64(fmsg["Bytes"].(float64))).
-		AddField("packets", int64(fmsg["Packets"].(float64))).
-		AddField("etype", int64(fmsg["Etype"].(float64))).
-		AddField("proto", int64(fmsg["Proto"].(float64))).
-		AddField("src_mac", fmsg["SrcMac"].(string)).
-		AddField("dst_mac", fmsg["DstMac"].(string)).
-		AddField("src_vlan", int64(fmsg["SrcVlan"].(float64))).
-		AddField("dst_vlan", int64(fmsg["DstVlan"].(float64))).
-		AddField("vlan_id", int64(fmsg["VlanId"].(float64))).
-		AddField("ingress_vrf_id", int64(fmsg["IngressVrfId"].(float64))).
-		AddField("egress_vrf_id", int64(fmsg["EgressVrfId"].(float64))).
-		AddField("ip_tos", int64(fmsg["IpTos"].(float64))).
-		AddField("forwarding_status", int64(fmsg["ForwardingStatus"].(float64))).
-		AddField("ip_ttl", int64(fmsg["IpTtl"].(float64))).
-		AddField("tcp_flags", int64(fmsg["TcpFlags"].(float64))).
-		AddField("icmp_type", int64(fmsg["IcmpType"].(float64))).
-		AddField("icmp_code", int64(fmsg["IcmpCode"].(float64))).
-		AddField("ipv6_flow_label", int64(fmsg["Ipv6FlowLabel"].(float64))).
-		AddField("fragment_id", int64(fmsg["FragmentId"].(float64))).
-		AddField("fragment_offset", int64(fmsg["FragmentOffset"].(float64))).
-		AddField("bi_flow_direction", int64(fmsg["BiFlowDirection"].(float64))).
-		AddField("src_as", int64(fmsg["SrcAs"].(float64))).
-		AddField("dst_as", int64(fmsg["DstAs"].(float64))).
-		AddField("next_hop", fmsg["NextHop"].(string)).
-		AddField("next_hop_as", int64(fmsg["NextHopAs"].(float64))).
-		AddField("src_net", int64(fmsg["SrcNet"].(float64))).
-		AddField("dst_net", int64(fmsg["DstNet"].(float64))).
-		AddField("bgp_next_hop", fmsg["BgpNextHop"].([]interface{})).
-		AddField("bgp_communities", fmsg["BgpCommunities"].([]interface{})).
-		AddField("as_path", fmsg["AsPath"].([]interface{})).
-		AddField("has_mpls", fmsg["HasMpls"].(bool)).
-		AddField("mpls_count", int64(fmsg["MplsCount"].(float64))).
-		AddField("mpls_1_ttl", int64(fmsg["Mpls_1Ttl"].(float64))).
-		AddField("mpls_1_label", int64(fmsg["Mpls_1Label"].(float64))).
-		AddField("mpls_2_ttl", int64(fmsg["Mpls_2Ttl"].(float64))).
-		AddField("mpls_2_label", int64(fmsg["Mpls_2Label"].(float64))).
-		AddField("mpls_3_ttl", int64(fmsg["Mpls_3Ttl"].(float64))).
-		AddField("mpls_3_label", int64(fmsg["Mpls_3Label"].(float64))).
-		AddField("mpls_last_ttl", int64(fmsg["MplsLastTtl"].(float64))).
-		AddField("mpls_last_label", int64(fmsg["MplsLastLabel"].(float64))).
-		AddField("mpls_label_ip", fmsg["MplsLabelIp"].([]interface{})).
-		AddField("observation_domain_id", int64(fmsg["ObservationDomainId"].(float64))).
-		AddField("observation_point_id", int64(fmsg["ObservationPointId"].(float64))).
-		//AddField("custom_int_1", int64(fmsg["CustomInteger_1"].(float64))).
-		//AddField("custom_int_2", int64(fmsg["CustomInteger_2"].(float64))).
-		//AddField("custom_int_3", int64(fmsg["CustomInteger_3"].(float64))).
-		//AddField("custom_int_4", int64(fmsg["CustomInteger_4"].(float64))).
-		//AddField("custom_int_5", int64(fmsg["CustomInteger_5"].(float64))).
-		//AddField("custom_bytes_1", fmsg["CustomBytes_1"].([]interface{})).
-		//AddField("custom_bytes_2", fmsg["CustomBytes_2"].([]interface{})).
-		//AddField("custom_bytes_3", fmsg["CustomBytes_3"].([]interface{})).
-		//AddField("custom_bytes_4", fmsg["CustomBytes_4"].([]interface{})).
-		//AddField("custom_bytes_5", fmsg["CustomBytes_5"].([]interface{})).
-		SetTime(time.Unix(int64(fmsg["TimeReceived"].(float64)), 0))
+	d.lock.Lock()
+	d.batchData = append(d.batchData, flowData)
+	currentBatchSize := len(d.batchData)
+	d.lock.Unlock()
 
-	if val, ok := fmsg["SrcCountry"]; ok {
-		p.AddField("src_country", val.(string))
+	if currentBatchSize >= d.batchSize {
+		return d.sendBatch()
 	}
-	if val, ok := fmsg["DstCountry"]; ok {
-		p.AddField("dst_country", val.(string))
-	}
-	// write asynchronously
-	d.writeApi.WritePoint(p)
 
-	d.writeApi.Flush()
 	return nil
 }
 
-func (d *InfluxDbDriver) Close(context.Context) error {
-	d.client.Close()
-	close(d.q)
+func (d *InfluxDbDriver) sendBatch() error {
+	d.lock.Lock()
+	if len(d.batchData) == 0 {
+		d.lock.Unlock()
+		return nil
+	}
+
+	// Create a copy of batch data to process
+	batchToSend := make([]map[string]interface{}, len(d.batchData))
+	copy(batchToSend, d.batchData)
+
+	// Clear current batch data
+	d.batchData = d.batchData[:0]
+	d.lock.Unlock()
+
+	// Prepare data for InfluxDB
+	lines := make([]string, 0, len(batchToSend))
+
+	for _, flow := range batchToSend {
+		// Create line protocol format: <measurement>[,<tag_key>=<tag_value>...] <field_key>=<field_value>[,<field_key>=<field_value>...] [<timestamp>]
+
+		// Define tags (metadata) and fields (measurement values)
+		tags := ""
+		fields := ""
+		timestamp := ""
+
+		// Add common tags if available
+		for _, tagKey := range []string{"Type", "SamplerAddress", "SrcAddr", "DstAddr"} {
+			if val, ok := flow[tagKey]; ok && val != nil {
+				tags += fmt.Sprintf(",%s=%v", tagKey, val)
+			}
+		}
+
+		// Add all remaining fields
+		isFirstField := true
+		for k, v := range flow {
+			// Skip keys already used as tags
+			if k == "Type" || k == "SamplerAddress" || k == "SrcAddr" || k == "DstAddr" {
+				continue
+			}
+
+			// Format value based on type
+			var formattedValue string
+			switch v := v.(type) {
+			case string:
+				formattedValue = fmt.Sprintf("\"%s\"", v)
+			case bool:
+				formattedValue = fmt.Sprintf("%t", v)
+			case float64:
+				if k == "TimeFlowStart" || k == "TimeReceived" || k == "TimeFlowEnd" {
+					// Use time field as timestamp
+					timestamp = fmt.Sprintf(" %d", int64(v))
+					continue
+				}
+				formattedValue = fmt.Sprintf("%v", v)
+			default:
+				formattedValue = fmt.Sprintf("%v", v)
+			}
+
+			if isFirstField {
+				fields += k + "=" + formattedValue
+				isFirstField = false
+			} else {
+				fields += "," + k + "=" + formattedValue
+			}
+		}
+
+		// If no timestamp, use current time
+		if timestamp == "" {
+			timestamp = fmt.Sprintf(" %d", time.Now().UnixNano()/int64(time.Millisecond))
+		}
+
+		// Create line protocol
+		line := d.influxMeasurement
+		if tags != "" {
+			line += tags
+		}
+		line += " " + fields + timestamp
+
+		lines = append(lines, line)
+	}
+
+	// Send data to InfluxDB
+	payload := []byte(strings.Join(lines, "\n"))
+
+	// Create URL with parameters
+	apiUrl, err := url.Parse(d.influxUrl)
+	if err != nil {
+		return err
+	}
+
+	apiUrl.Path = "/api/v2/write"
+	q := apiUrl.Query()
+	q.Set("org", d.influxOrganization)
+	q.Set("bucket", d.influxBucket)
+	q.Set("precision", d.influxPrecision)
+	apiUrl.RawQuery = q.Encode()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		for i := 0; i < d.maxRetries; i++ {
+			req, err := http.NewRequest("POST", apiUrl.String(), bytes.NewBuffer(payload))
+			if err != nil {
+				if d.influxLogErrors {
+					log.Errorf("Error creating request: %v", err)
+				}
+				return
+			}
+
+			req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+			req.Header.Set("Authorization", "Token "+d.influxToken)
+			if d.influxGZip {
+				req.Header.Set("Content-Encoding", "gzip")
+			}
+
+			client := &http.Client{
+				Timeout: 10 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						InsecureSkipVerify: d.influxTLSSkipVerify,
+					},
+				},
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				if d.influxLogErrors {
+					log.Errorf("Error sending data to InfluxDB: %v", err)
+				}
+				if i == d.maxRetries-1 {
+					return
+				}
+				time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i)))) // exponential backoff
+				continue
+			}
+
+			defer resp.Body.Close()
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				if d.influxLogErrors {
+					log.Errorf("InfluxDB responded with status code %d", resp.StatusCode)
+				}
+				if i == d.maxRetries-1 {
+					return
+				}
+				time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i)))) // exponential backoff
+				continue
+			}
+
+			// Success
+			break
+		}
+	}()
+
+	wg.Wait()
 	return nil
+}
+
+func (d *InfluxDbDriver) Close() error {
+	// Send final batch
+	err := d.sendBatch()
+	close(d.q)
+	return err
 }
 
 func init() {
