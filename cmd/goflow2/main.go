@@ -29,9 +29,10 @@ import (
 	_ "github.com/netsampler/goflow2/v2/format/text"
 
 	// various transports
-	_ "github.com/netsampler/goflow2/transport/influxdb"
 	"github.com/netsampler/goflow2/v2/transport"
 	_ "github.com/netsampler/goflow2/v2/transport/file"
+	_ "github.com/netsampler/goflow2/v2/transport/http"
+	_ "github.com/netsampler/goflow2/v2/transport/influxdb"
 	_ "github.com/netsampler/goflow2/v2/transport/kafka"
 
 	// various producers
