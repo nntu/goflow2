@@ -6,9 +6,7 @@ require (
 	github.com/Shopify/sarama v1.38.1
 	github.com/jnovack/flag v1.25.0
 	github.com/libp2p/go-reuseport v0.4.0
-	github.com/netsampler/goflow2 v1.3.7
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
@@ -21,11 +19,9 @@ require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
 	github.com/google/uuid v1.3.1 // indirect
 	github.com/influxdata/line-protocol v0.0.0-20200327222509-2487e7298839 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/oapi-codegen/runtime v1.0.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	github.com/jnovack/flag v1.25.0 // indirect
-	github.com/oapi-codegen/runtime v1.0.0 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
 )
 
 require (
@@ -60,8 +56,4 @@ require (
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	golang.org/x/crypto v0.38.0 // indirect
-	golang.org/x/net v0.40.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
 )
