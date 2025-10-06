@@ -126,3 +126,12 @@ package-rpm: prepare
         $(OUTPUT)=/usr/bin/goflow2 \
         package/goflow2.service=/lib/systemd/system/goflow2.service \
         package/goflow2.env=/etc/default/goflow2
+# rule release: tạo tag và build deb
+release:
+	@if [ -z "$(TAG)" ]; then \
+	    echo "❌  make release TAG=v1.0.0"; \
+	    exit 1; \
+	fi
+	@git tag -a $(TAG) -m "Release $(TAG)"
+	@git push origin $(TAG)
+	@$(MAKE) deb VERSION=$(TAG)
