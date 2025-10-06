@@ -1,7 +1,6 @@
 package influxdb
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"strconv"
@@ -10,7 +9,7 @@ import (
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
 	"github.com/jnovack/flag"
-	"github.com/netsampler/goflow2/transport"
+	"github.com/netsampler/goflow2/v2/transport"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -40,7 +39,7 @@ func (d *InfluxDbDriver) Prepare() error {
 	return nil
 }
 
-func (d *InfluxDbDriver) Init(context.Context) error {
+func (d *InfluxDbDriver) Init() error {
 	client := influxdb2.NewClientWithOptions(d.influxUrl, d.influxToken,
 		influxdb2.DefaultOptions().
 			SetUseGZip(d.influxGZip).
@@ -164,7 +163,7 @@ func (d *InfluxDbDriver) Send(key, data []byte) error {
 	return nil
 }
 
-func (d *InfluxDbDriver) Close(context.Context) error {
+func (d *InfluxDbDriver) Close() error {
 	d.client.Close()
 	close(d.q)
 	return nil

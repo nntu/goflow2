@@ -22,6 +22,9 @@ require (
 	github.com/influxdata/line-protocol v0.0.0-20200327222509-2487e7298839 // indirect
 	github.com/oapi-codegen/runtime v1.0.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	github.com/jnovack/flag v1.25.0 // indirect
+	github.com/oapi-codegen/runtime v1.0.0 // indirect
+	github.com/sirupsen/logrus v1.9.3 // indirect
 )
 
 require (
@@ -56,4 +59,8 @@ require (
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
+	golang.org/x/crypto v0.38.0 // indirect
+	golang.org/x/net v0.40.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.25.0 // indirect
 )
