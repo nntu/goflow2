@@ -1,0 +1,88 @@
+formatter:
+  fields: # list of fields to format in JSON
+    - type
+    - time_received_ns
+    - sequence_num
+    - sampling_rate
+    - flow_direction
+    - sampler_address
+    - time_flow_start_ns
+    - time_flow_end_ns
+    - bytes
+    - packets
+    - src_addr
+    - src_net
+    - dst_addr
+    - dst_net
+    - etype
+    - proto
+    - src_port
+    - dst_port
+    - in_if
+    - out_if
+    - src_mac
+    - dst_mac
+    # additional fields
+    - icmp_name # virtual column
+    - csum # udp checksum
+  key:
+    - sampler_address
+  protobuf: # manual protobuf fields addition
+    - name: flow_direction
+      index: 42
+      type: varint
+    - name: bi_flow_direction
+      index: 41
+      type: varint
+    - name: ingress_vrf_id
+      index: 39
+      type: varint
+    - name: egress_vrf_id
+      index: 40
+      type: varint
+    - name: csum
+      index: 999
+      type: varint
+  render:
+    time_received_ns: datetimenano
+# Decoder mappings
+ipfix:
+  mapping:
+    - field: 61
+      destination: flow_direction
+    - field: 239
+      destination: bi_flow_direction
+    - field: 234
+      destination: ingress_vrf_id
+    - field: 235
+      destination: egress_vrf_id
+netflowv9:
+  mapping:
+    - field: 34 # samplingInterval provided within the template
+      destination: sampling_rate
+      endian: little
+    - field: 61
+      destination: flow_direction
+sflow:
+  ports:
+    - proto: "udp"
+      dir: "dst"
+      port: 3544
+      parser: "teredo-dst"
+    - proto: "udp"
+      dir: "both"
+      port: 4754
+      parser: "gre"
+    - proto: "udp"
+      dir: "both"
+      port: 6081
+      parser: "geneve"
+  mapping:
+    - layer: "udp"
+      offset: 48
+      length: 16
+      destination: csum
+    - layer: "tcp"
+      offset: 128
+      length: 16
+      destination: csum
