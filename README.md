@@ -165,6 +165,21 @@ $ ./goflow2 -listen 'sflow://:6343?count=4,netflow://:2055'
 
 More information about workers and resource usage is avaialble on the [Performance page](/docs/performance.md).
 
+### HTTP Endpoint
+
+goflow2 can send data to an HTTP endpoint. The endpoint must be configured with the `-transport=http` option.
+
+Here is an example to send data to OpenObserve `json` endpoint:
+
+```bash
+./goflow2 -transport=http \
+  -transport.http.destination=http://localhost:5080/api/default/gflow2/_json \
+  -transport.http.batchSize=1000 \
+  -transport.http.auth.header=Authorization \
+  -transport.http.auth.credentials="Basic cm9vdEBleGFtcGxlLmNvbTpDb21wbGV4cGFzcyMxMjM="
+```
+
+
 ### Docker
 
 You can also run directly with a container:
