@@ -1,7 +1,6 @@
 package influxdb
 
 import (
-	"context"
 	"crypto/tls"
 	"encoding/json"
 	"strconv"
