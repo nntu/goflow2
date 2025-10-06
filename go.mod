@@ -8,11 +8,12 @@ require (
 	github.com/libp2p/go-reuseport v0.4.0
 	github.com/netsampler/goflow2 v1.3.7
 	github.com/oschwald/geoip2-golang v1.13.0
+	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
 	github.com/xdg-go/scram v1.1.2
-	google.golang.org/protobuf v1.36.8
+	google.golang.org/protobuf v1.36.10
 	gopkg.in/yaml.v3 v3.0.1
 )
 
