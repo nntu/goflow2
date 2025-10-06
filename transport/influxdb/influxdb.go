@@ -8,7 +8,7 @@ import (
 
 	influxdb2 "github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api"
-	"github.com/jnovack/flag"
+	"flag"
 	"github.com/netsampler/goflow2/v2/transport"
 	log "github.com/sirupsen/logrus"
 )
