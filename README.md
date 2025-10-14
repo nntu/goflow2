@@ -178,6 +178,18 @@ Here is an example to send data to OpenObserve `json` endpoint:
   -transport.http.auth.header=Authorization \
   -transport.http.auth.credentials="Basic cm9vdEBleGFtcGxlLmNvbTpDb21wbGV4cGFzcyMxMjM="
 ```
+### influxdb Endpoint
+
+
+--transport=influxdb  --transport.influxdb.url=http://192.168.1.5:8086  --transport.influxdb.organization="37f36a33270777dd" --transport.influxdb.bucket="goflow2" --transport.influxdb.token= 
+
+
+
+
+
+
+
+
 
 
 ### Docker
