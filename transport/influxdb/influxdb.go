@@ -2,6 +2,7 @@ package influxdb
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -12,7 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jnovack/flag"
+	"flag"
+
 	"github.com/netsampler/goflow2/v2/transport"
 	log "github.com/sirupsen/logrus"
 )
@@ -39,7 +41,7 @@ func (d *InfluxDbDriver) Prepare() error {
 	flag.StringVar(&d.influxUrl, "transport.influxdb.url", "http://localhost:8086", "InfluxDB URL including port")
 	flag.StringVar(&d.influxToken, "transport.influxdb.token", "", "InfluxDB API token")
 	flag.StringVar(&d.influxOrganization, "transport.influxdb.organization", "", "InfluxDB organization containing bucket")
-	flag.StringVar(&d.influxBucket, "transport.influxdb.bucket", "", "InfluxDB bucket used for writing")
+	flag.StringVar(&d.influxBucket, "transport.influxdb.bucket", "netflow", "InfluxDB bucket used for writing")
 	flag.StringVar(&d.influxMeasurement, "transport.influxdb.measurement", "flowdata", "InfluxDB measurement name")
 	flag.StringVar(&d.influxPrecision, "transport.influxdb.precision", "ms", "InfluxDB time precision (ns, us, ms, s)")
 	flag.BoolVar(&d.influxGZip, "transport.influxdb.gzip", true, "Use GZip compression")
@@ -63,6 +65,14 @@ func (d *InfluxDbDriver) Prepare() error {
 }
 
 func (d *InfluxDbDriver) Init() error {
+	// Đảm bảo bucket có giá trị
+	if d.influxBucket == "" {
+		d.influxBucket = "netflow"
+	}
+	if d.influxOrganization == "" {
+		d.influxOrganization = "org"
+	}
+
 	d.q = make(chan bool, 1)
 	d.batchData = make([]map[string]interface{}, 0, d.batchSize)
 	d.lock = &sync.RWMutex{}
@@ -94,59 +104,63 @@ func (d *InfluxDbDriver) sendBatch() error {
 		d.lock.Unlock()
 		return nil
 	}
-
-	// Create a copy of batch data to process
 	batchToSend := make([]map[string]interface{}, len(d.batchData))
 	copy(batchToSend, d.batchData)
-
-	// Clear current batch data
 	d.batchData = d.batchData[:0]
 	d.lock.Unlock()
 
-	// Prepare data for InfluxDB
 	lines := make([]string, 0, len(batchToSend))
-
 	for _, flow := range batchToSend {
-		// Create line protocol format: <measurement>[,<tag_key>=<tag_value>...] <field_key>=<field_value>[,<field_key>=<field_value>...] [<timestamp>]
-
-		// Define tags (metadata) and fields (measurement values)
+		// Tự map các trường cần thiết, kiểm tra kiểu dữ liệu
 		tags := ""
 		fields := ""
-		timestamp := ""
+		var timestamp string
 
-		// Add common tags if available
-		for _, tagKey := range []string{"Type", "SamplerAddress", "SrcAddr", "DstAddr"} {
-			if val, ok := flow[tagKey]; ok && val != nil {
-				tags += fmt.Sprintf(",%s=%v", tagKey, val)
-			}
+		// Map tags
+		if v, ok := flow["Type"].(string); ok && v != "" {
+			tags += ",Type=" + v
+		}
+		if v, ok := flow["SamplerAddress"].(string); ok && v != "" {
+			tags += ",SamplerAddress=" + v
+		}
+		if v, ok := flow["SrcAddr"].(string); ok && v != "" {
+			tags += ",SrcAddr=" + v
+		}
+		if v, ok := flow["DstAddr"].(string); ok && v != "" {
+			tags += ",DstAddr=" + v
 		}
 
-		// Add all remaining fields
+		// Map fields
 		isFirstField := true
 		for k, v := range flow {
 			// Skip keys already used as tags
 			if k == "Type" || k == "SamplerAddress" || k == "SrcAddr" || k == "DstAddr" {
 				continue
 			}
-
 			// Format value based on type
 			var formattedValue string
-			switch v := v.(type) {
+			switch val := v.(type) {
 			case string:
-				formattedValue = fmt.Sprintf("\"%s\"", v)
+				formattedValue = fmt.Sprintf("\"%s\"", val)
 			case bool:
-				formattedValue = fmt.Sprintf("%t", v)
+				formattedValue = fmt.Sprintf("%t", val)
 			case float64:
+				// Nếu là trường thời gian thì dùng làm timestamp
 				if k == "TimeFlowStart" || k == "TimeReceived" || k == "TimeFlowEnd" {
-					// Use time field as timestamp
-					timestamp = fmt.Sprintf(" %d", int64(v))
+					timestamp = fmt.Sprintf(" %d", int64(val))
 					continue
 				}
-				formattedValue = fmt.Sprintf("%v", v)
+				// Nếu là số nguyên, format không có dấu chấm
+				if val == float64(int64(val)) {
+					formattedValue = fmt.Sprintf("%d", int64(val))
+				} else {
+					formattedValue = fmt.Sprintf("%f", val)
+				}
+			case int, int64:
+				formattedValue = fmt.Sprintf("%d", val)
 			default:
-				formattedValue = fmt.Sprintf("%v", v)
+				formattedValue = fmt.Sprintf("\"%v\"", val)
 			}
-
 			if isFirstField {
 				fields += k + "=" + formattedValue
 				isFirstField = false
@@ -155,30 +169,32 @@ func (d *InfluxDbDriver) sendBatch() error {
 			}
 		}
 
-		// If no timestamp, use current time
+		// Nếu không có timestamp thì lấy time.Now()
 		if timestamp == "" {
 			timestamp = fmt.Sprintf(" %d", time.Now().UnixNano()/int64(time.Millisecond))
 		}
 
-		// Create line protocol
-		line := d.influxMeasurement
-		if tags != "" {
-			line += tags
-		}
-		line += " " + fields + timestamp
-
+		// Tạo line protocol
+		line := d.influxMeasurement + tags + " " + fields + timestamp
 		lines = append(lines, line)
 	}
 
-	// Send data to InfluxDB
-	payload := []byte(strings.Join(lines, "\n"))
-
-	// Create URL with parameters
-	apiUrl, err := url.Parse(d.influxUrl)
-	if err != nil {
-		return err
+	// Kiểm tra các tham số bắt buộc
+	if d.influxBucket == "" {
+		return fmt.Errorf("transport error: missing influxdb.bucket")
+	}
+	if d.influxOrganization == "" {
+		return fmt.Errorf("transport error: missing influxdb.organization")
+	}
+	if d.influxUrl == "" {
+		return fmt.Errorf("transport error: missing influxdb.url")
 	}
 
+	// Tạo URL với tham số
+	apiUrl, err := url.Parse(d.influxUrl)
+	if err != nil {
+		return fmt.Errorf("transport error: invalid influxdb.url: %v", err)
+	}
 	apiUrl.Path = "/api/v2/write"
 	q := apiUrl.Query()
 	q.Set("org", d.influxOrganization)
@@ -186,68 +202,66 @@ func (d *InfluxDbDriver) sendBatch() error {
 	q.Set("precision", d.influxPrecision)
 	apiUrl.RawQuery = q.Encode()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// Chuẩn bị payload
+	payload := []byte(strings.Join(lines, "\n"))
 
-	go func() {
-		defer wg.Done()
-
-		for i := 0; i < d.maxRetries; i++ {
-			req, err := http.NewRequest("POST", apiUrl.String(), bytes.NewBuffer(payload))
-			if err != nil {
-				if d.influxLogErrors {
-					log.Errorf("Error creating request: %v", err)
-				}
-				return
-			}
-
-			req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-			req.Header.Set("Authorization", "Token "+d.influxToken)
-			if d.influxGZip {
-				req.Header.Set("Content-Encoding", "gzip")
-			}
-
-			client := &http.Client{
-				Timeout: 10 * time.Second,
-				Transport: &http.Transport{
-					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: d.influxTLSSkipVerify,
-					},
-				},
-			}
-
-			resp, err := client.Do(req)
-			if err != nil {
-				if d.influxLogErrors {
-					log.Errorf("Error sending data to InfluxDB: %v", err)
-				}
-				if i == d.maxRetries-1 {
-					return
-				}
-				time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i)))) // exponential backoff
-				continue
-			}
-
-			defer resp.Body.Close()
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				if d.influxLogErrors {
-					log.Errorf("InfluxDB responded with status code %d", resp.StatusCode)
-				}
-				if i == d.maxRetries-1 {
-					return
-				}
-				time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i)))) // exponential backoff
-				continue
-			}
-
-			// Success
-			break
+	// Nếu bật gzip, nén payload
+	if d.influxGZip {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, err := gz.Write(payload)
+		gz.Close()
+		if err != nil {
+			return fmt.Errorf("transport error: gzip failed: %v", err)
 		}
-	}()
+		payload = buf.Bytes()
+	}
 
-	wg.Wait()
-	return nil
+	// Gửi dữ liệu
+	req, err := http.NewRequest("POST", apiUrl.String(), bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("transport error: cannot create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("Authorization", "Token "+d.influxToken)
+	if d.influxGZip {
+		req.Header.Set("Content-Encoding", "gzip")
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: d.influxTLSSkipVerify,
+			},
+		},
+	}
+
+	var lastErr error
+	for i := 0; i < d.maxRetries; i++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("transport error: send failed: %v", err)
+			if d.influxLogErrors {
+				log.Errorf("Error sending data to InfluxDB: %v", err)
+			}
+			time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i))))
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("transport error: InfluxDB responded with status code %d", resp.StatusCode)
+			if d.influxLogErrors {
+				log.Errorf("InfluxDB responded with status code %d", resp.StatusCode)
+			}
+			time.Sleep(d.retryDelay * time.Duration(math.Pow(2, float64(i))))
+			continue
+		}
+		// Success
+		lastErr = nil
+		break
+	}
+	return lastErr
 }
 
 func (d *InfluxDbDriver) Close() error {
